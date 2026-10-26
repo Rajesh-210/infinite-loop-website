@@ -1,0 +1,22 @@
+From a ZIP file to an automated deployment — my Infinite Loop website CI/CD project 🚀
+
+I wanted to go beyond simply running a website locally. I started with a ZIP containing a static HTML template and built a deployment workflow around it.
+
+Here’s the journey:
+🔹 Extracted and inspected the HTML, CSS, JavaScript, and asset folders
+🔹 Initialized Git and pushed the source code to GitHub
+🔹 Containerized the site with Docker and Nginx
+🔹 Created a Jenkins Pipeline to check out the code, validate the project, build the image, test it, and deploy it
+🔹 Connected Jenkins to Git SCM polling so new commits trigger builds automatically
+🔹 Deployed the container on AWS EC2 and verified the website with the browser and curl (HTTP 200 OK)
+
+The milestone I enjoyed most: I edited the page directly in GitHub, committed the change, and watched Jenkins run the pipeline. The updated heading appeared on the live website.
+
+Architecture:
+GitHub → Jenkins → Checkout & Validate → Docker Build → Image Test → AWS EC2 → Nginx → Live Website
+
+This project helped me connect the pieces of a practical CI/CD workflow—not just build a Docker image, but automate the path from a code change to a running website.
+
+Next improvements on my list: GitHub webhooks, HTTPS, deployment health checks, and rollback handling.
+
+#DevOps #Jenkins #Docker #AWS #GitHub #CICD #Nginx #CloudComputing #LearningByDoing
