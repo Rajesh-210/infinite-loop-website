@@ -1,6 +1,6 @@
 pipeline {
     agent any
-    
+
     options {
         timestamps()
     }
@@ -38,6 +38,27 @@ pipeline {
                     set -eu
                     docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} .
                     docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest
+                '''
+            }
+        }
+
+        stage('Trivy Security Scan') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Checking Trivy installation..."
+                    trivy --version
+
+                    echo "Scanning image: ${IMAGE_NAME}:${BUILD_NUMBER}"
+
+                    trivy image \
+                        --scanners vuln \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        ${IMAGE_NAME}:${BUILD_NUMBER}
+
+                    echo "Trivy scan passed. No HIGH or CRITICAL vulnerabilities found."
                 '''
             }
         }
