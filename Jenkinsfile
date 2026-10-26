@@ -50,6 +50,18 @@ pipeline {
                     echo "Checking Trivy installation..."
                     trivy --version
 
+                    echo "Creating security report..."
+
+                    mkdir -p reports
+
+                    trivy image \
+                        --scanners vuln \
+                        --format table \
+                        --output reports/trivy-report.txt \
+                        ${IMAGE_NAME}:${BUILD_NUMBER}
+                    
+                    echo "Enforcing HIGH and CRITICAL vulnerability policy..."    
+
                     echo "Scanning image: ${IMAGE_NAME}:${BUILD_NUMBER}"
 
                     trivy image \
@@ -117,6 +129,12 @@ pipeline {
     }
 
     post {
+
+        always {
+            archiveArtifacts artifacts: 'reports/trivy-report.txt',
+                allowEmptyArchive: true
+            echo 'Trivy security report archiving step completed.'
+        }
         success {
             echo 'Pipeline completed successfully.'
         }
