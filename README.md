@@ -1,4 +1,4 @@
-# Infinite Loop Website --- Docker & Jenkins CI/CD on AWS EC2 GitHub webhook CI/CD test
+# Infinite Loop Website --- Docker & Jenkins CI/CD on AWS EC2
 
 > A static website deployment project demonstrating a practical CI/CD
 > workflow with GitHub, Jenkins, Docker, Nginx, and AWS EC2.
