@@ -30,7 +30,7 @@ pipeline {
                         --report-format json \
                         --report-path reports/gitleaks-report.json
                     SCAN_STATUS=$?
-                    Set -e
+                    set -e
 
                     exit $SCAN_STATUS
                 ''' 
@@ -48,6 +48,21 @@ pipeline {
                     test -d img
                     echo "Project structure validation successful."
                 '''
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarScanner'
+
+                    withSonarQubeEnv('SonarQube') {
+                        sh """
+                            set -eu
+                            "\${scannerHome}/bin/sonar-scanner"
+                        """
+                    }
+                }
             }
         }
 
