@@ -59,7 +59,14 @@ pipeline {
                          withEnv(["SCANNER_HOME=${scannerHome}"]) {
                              sh '''
                                 set -eu
-                                "$SCANNER_HOME/bin/sonar-scanner"
+
+                                if [ -z "${SONAR_AUTH_TOKEN:-}" ]; then
+                                     echo "ERROR: Jenkins did not provide SONAR_AUTH_TOKEN."
+                                     exit 1
+                                fi
+                                
+                                "$SCANNER_HOME/bin/sonar-scanner" \
+                                    -Dsonar.token="$SONAR_AUTH_TOKEN"
                               '''
                          }
                     }
