@@ -18,6 +18,25 @@ pipeline {
             }
         }
 
+        stage('Gitleaks Secret Scan') {
+            steps {
+                sh '''
+                    set +e
+                    mkdir -p reports
+
+                    gitleaks detect \
+                        --source . \
+                        --redact \
+                        --report-format json \
+                        --report-path reports/gitleaks-report.json
+                    SCAN_STATUS=$?
+                    Set -e
+
+                    exit $SCAN_STATUS
+                ''' 
+            }
+        }   
+
         stage('Validate Project') {
             steps {
                 sh '''
@@ -131,7 +150,7 @@ pipeline {
     post {
 
         always {
-            archiveArtifacts artifacts: 'reports/trivy-report.txt',
+            archiveArtifacts artifacts: 'reports/trivy-report.txt,reports/gitleaks-report.json',
                 allowEmptyArchive: true
             echo 'Trivy security report archiving step completed.'
         }
