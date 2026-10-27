@@ -59,7 +59,7 @@ pipeline {
                     withSonarQubeEnv('SonarQube') {
                         sh """
                             set -eu
-                            "\${scannerHome}/bin/sonar-scanner"
+                            "${scannerHome}/bin/sonar-scanner"
                         """
                     }
                 }
