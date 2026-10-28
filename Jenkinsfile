@@ -12,6 +12,11 @@ pipeline {
         CONTAINER_NAME = 'infinite-loop-website'
         HOST_PORT      = '8081'
         WEBSITE_IP     = '43.204.97.216'
+        AWS_REGION     = 'ap-south-1'
+        AWS_ACCOUNT_ID = '463771485942'
+        ECR_REPOSITORY = 'infinite-loop-website'
+        ECR_REGISTRY   = '463771485942.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_IMAGE      = '463771485942.dkr.ecr.ap-south-1.amazonaws.com/infinite-loop-website'
     }
 
     stages {
@@ -169,16 +174,43 @@ pipeline {
             }
         }
 
+        stage('Push Image to Amazon ECR') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Checking AWS identity available to Jenkins..."
+                    aws sts get-caller-identity
+
+                    echo "Logging in to Amazon ECR..."
+                    aws ecr get-login-password --region "$AWS_REGION" | \
+                        docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+                    echo "Tagging versioned image for ECR..."
+                    docker tag "${IMAGE_NAME}:${BUILD_NUMBER}" "${ECR_IMAGE}:${BUILD_NUMBER}"
+                    docker tag "${IMAGE_NAME}:${BUILD_NUMBER}" "${ECR_IMAGE}:latest"
+
+                    echo "Pushing versioned image..."
+                    docker push "${ECR_IMAGE}:${BUILD_NUMBER}"
+
+                    echo "Pushing latest tag..."
+                    docker push "${ECR_IMAGE}:latest"
+
+                    echo "Image pushed successfully to Amazon ECR."
+                '''
+            }
+        }
+
         stage('Deploy and Verify') {
             steps {
                 sh '''
                     set -eu
 
-                    NEW_IMAGE="${IMAGE_NAME}:${BUILD_NUMBER}"
+                    NEW_IMAGE="${ECR_IMAGE}:${BUILD_NUMBER}"
 
                     echo "New image: $NEW_IMAGE"
 
-                    # Remember the image used by the existing container.
+                    # Remember the image used by the existing container before replacing it.
                     PREVIOUS_IMAGE=$(docker inspect \
                         --format='{{.Config.Image}}' \
                         "$CONTAINER_NAME" 2>/dev/null || true)
