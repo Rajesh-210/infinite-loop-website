@@ -1,72 +1,173 @@
-# Infinite Loop Website --- Docker & Jenkins CI/CD on AWS EC2
+# Infinite Loop Website --- CI/CD on AWS
 
-> A static website deployment project demonstrating a practical CI/CD
-> workflow with GitHub, Jenkins, Docker, Nginx, and AWS EC2.
+A static website deployment project demonstrating an automated CI/CD
+pipeline using GitHub, Jenkins, Docker, SonarQube, Gitleaks, and Trivy.
 
-## Project story
+**Repository:** https://github.com/Rajesh-210/infinite-loop-website\
+**Jenkins job:** `infinite-loop-website-pipeline`\
+**Default branch observed:** `main`
 
-This project started with a ZIP file containing a static HTML template.
-Instead of stopping at "the website runs on my laptop," I turned it into
-a repeatable deployment workflow.
+> **Verification status:** Build #21 was triggered by a GitHub push
+> (`Update README.md`) and all displayed pipeline stages passed. Build
+> #19 was used to test Quality Gate failure; later build/deployment
+> stages did not proceed.
 
-I initialized Git locally, created a GitHub repository, pushed the
-website source code, wrote a Dockerfile to package the site, and
-configured a Jenkins Pipeline to validate the project, build and test
-the Docker image, and deploy the container on an AWS EC2 instance.
+## Table of contents
 
-The most useful milestone was editing `index.html` directly in GitHub
-and watching Jenkins detect the new commit and run the pipeline. The
-updated website then appeared in the browser.
+-   [Overview](#overview)
+-   [Architecture](#architecture)
+-   [Technology stack](#technology-stack)
+-   [Pipeline stages](#pipeline-stages)
+-   [Repository structure](#repository-structure)
+-   [Configuration](#configuration)
+-   [GitHub webhook](#github-webhook)
+-   [Quality Gate test](#quality-gate-test)
+-   [Security reports](#security-reports)
+-   [Troubleshooting](#troubleshooting)
+-   [Security recommendations](#security-recommendations)
+-   [Future improvements](#future-improvements)
 
-## Architecture / flow diagram
+## Overview
 
-``` mermaid
+The project automates the deployment of the Infinite Loop Website. A
+GitHub push triggers Jenkins, which checks out the source, scans for
+secrets, analyzes code quality, enforces a SonarQube Quality Gate,
+builds and scans a Docker image, tests the image, deploys the website,
+and archives scan reports.
+
+### Objectives
+
+-   Trigger builds automatically from GitHub push events.
+-   Scan source files for potential secrets with Gitleaks.
+-   Analyze the project with SonarQube and enforce its Quality Gate.
+-   Build a Docker image for the website.
+-   Scan the image for known vulnerabilities using Trivy.
+-   Test the container before deployment.
+-   Archive security reports in Jenkins.
+
+## Architecture
+
+```mermaid
 flowchart TD
-    A[Website source ZIP] --> B[Extract HTML, CSS, JS, images]
-    B --> C[Initialize Git locally]
-    C --> D[Commit and push to GitHub]
-    D --> E[GitHub webhook sends push event]
-    E --> F[Jenkins starts Pipeline]
-    F --> G[Checkout source code]
-    G --> H[Gitleaks secret scan]
-    H --> I[Validate project files]
-    I --> J[SonarQube analysis]
-    J --> K[Wait for Quality Gate]
-    K --> L[Build Docker image]
-    L --> M[Trivy image scan]
-    M --> N[Test Docker image]
-    N --> O[Deploy container on AWS EC2]
-    O --> P[Nginx serves static website]
-    P --> Q[Browser: EC2 public IP : 8081]
+    A[Developer pushes code] --> B[GitHub repository]
+    B --> C[GitHub webhook / SCM trigger]
+    C --> D[Jenkins pipeline on EC2]
+    D --> E[Checkout and validate]
+    E --> F[Gitleaks secret scan]
+    F --> G[SonarQube analysis]
+    G --> H{Quality Gate passed?}
+    H -- No --> X[Stop pipeline]
+    H -- Yes --> I[Build Docker image]
+    I --> J[Trivy vulnerability scan]
+    J --> K[Test temporary container]
+    K --> L[Authenticate with EC2 IAM role]
+    L --> M[Push versioned tag and latest to private ECR]
+    M --> N[Deploy versioned image on website EC2]
+    N --> O[HTTP health check on port 8081]
+    O --> P[HTTPS health check through Nginx on 443]
+    P --> Q{Healthy?}
+    Q -- Yes --> R[Successful deployment]
+    Q -- No --> S[Attempt rollback to previous local image]
+    D --> T[Archive Gitleaks and Trivy reports]
 ```
 
-### CI/CD stages (current pipeline)
+### Current infrastructure and endpoints (observed 28 October 2026)
 
-1. **Declarative: Checkout SCM / Checkout:** Jenkins retrieves the latest commit from GitHub.
-2. **Gitleaks Secret Scan:** scans the repository for possible exposed secrets and writes `reports/gitleaks-report.json`.
-3. **Validate Project:** checks that required website files are present.
-4. **SonarQube Analysis:** sends project analysis to the SonarQube server.
-5. **Quality Gate:** `waitForQualityGate abortPipeline: true` waits for the analysis result. A failed gate stops the pipeline before image build and deployment.
-6. **Build Docker Image:** packages the static website into a Docker image.
-7. **Trivy Security Scan:** scans the image for known vulnerabilities and saves `reports/trivy-report.txt`.
-8. **Test Docker Image:** verifies the image/container can serve the website.
-9. **Deploy Website:** deploys the container on the EC2 host.
-10. **Declarative: Post Actions:** runs post-build actions and archives the scan reports.
+- Website EC2 public IP: `43.204.97.216`
+- Public website: `https://43.204.97.216`
+- Website container: `infinite-loop-website`, host port `8081` mapped to container port `80`
+- System Nginx terminates HTTPS on ports `80/443` and forwards/serves the application as configured.
+- Jenkins job: `infinite-loop-website-pipeline`; the Jenkins UI was previously accessed on port `8080`. Restrict access to trusted addresses.
+- SonarQube EC2 public IP observed earlier: `16.4.79.185`, UI port `9000`; keep this administrative interface restricted.
+- AWS account: `463771485942`; region: `ap-south-1` (Mumbai).
+- EC2 IAM role: `Image-push`. Jenkins successfully used the role to call STS and authenticate to ECR without static AWS access keys.
+- Private ECR repository: `463771485942.dkr.ecr.ap-south-1.amazonaws.com/infinite-loop-website`.
+
+IP addresses and ports are environment-specific and can change. Do not treat this documentation as a substitute for checking current EC2, DNS, and security-group configuration.
+
+### Infrastructure
+
+Two separate EC2 instances were used in the same AWS VPC:
+
+  -----------------------------------------------------------------------
+  Component               Role                    Port / notes
+  ----------------------- ----------------------- -----------------------
+  Jenkins EC2             Runs Jenkins and the    UI on `8080`; restrict
+                          pipeline                access
+
+  SonarQube EC2           Code analysis and       UI on `9000`; restrict
+                          Quality Gate            access
+
+  Docker                  Packages and runs the   Website was previously
+                          static website          exposed on host port
+                                                  `8081`
+
+  GitHub                  Source control and      HTTPS
+                          webhook event source    
+
+  Gitleaks / Trivy        Source-secret and       Executed in the
+                          image-vulnerability     pipeline
+                          scanning                
+  -----------------------------------------------------------------------
+
+The Jenkins host was observed at private IP `172.31.1.96`; SonarQube at
+`172.31.13.35`. These are environment-specific values, not permanent
+addresses.
 
 ## Technology stack
 
--   **Git & GitHub** --- version control and source-code hosting
--   **Jenkins Pipeline** --- CI/CD orchestration
--   **Docker** --- repeatable packaging and runtime
--   **Nginx** --- static website web server
--   **AWS EC2** --- Jenkins/SonarQube and website hosting environment
--   **SonarQube Community Build** --- static analysis and Quality Gate
--   **Gitleaks** --- repository secret scanning
--   **Trivy** --- container image vulnerability scanning
--   **GitHub Webhook** --- push-event notification to Jenkins
--   **HTML, CSS, JavaScript** --- website frontend
+-   AWS EC2 and VPC
+-   Ubuntu
+-   Git and GitHub
+-   Jenkins Declarative Pipeline
+-   Docker
+-   Nginx Alpine
+-   SonarQube Community Build and SonarScanner
+-   Gitleaks
+-   Trivy
+
+## Pipeline stages
+
+  -----------------------------------------------------------------------
+  Stage                               Purpose
+  ----------------------------------- -----------------------------------
+  Declarative: Checkout SCM /         Retrieves the repository and
+  Checkout                            selected commit
+
+  Gitleaks Secret Scan                Searches the repository for
+                                      potential secrets
+
+  Validate Project                    Checks required project files and
+                                      structure
+
+  SonarQube Analysis                  Runs static analysis and submits
+                                      results
+
+  Quality Gate                        Waits for SonarQube's quality
+                                      decision
+
+  Build Docker Image                  Builds the website image
+
+  Trivy Security Scan                 Scans the image for known
+                                      vulnerabilities
+
+  Test Docker Image                   Tests the built image/container
+
+  Push Image to Amazon ECR            Pushes versioned and latest tags to private ECR
+
+  Deploy and Verify                   Deploys the versioned image; checks HTTP/HTTPS and attempts rollback
+
+  Declarative: Post Actions           Archives scan reports and runs
+                                      post-build actions
+  -----------------------------------------------------------------------
+
+The Quality Gate stage uses `waitForQualityGate abortPipeline: true`. If
+the gate fails, the pipeline should stop before Docker build and
+deployment.
 
 ## Repository structure
+
+Observed repository items include:
 
 ``` text
 infinite-loop-website/
@@ -75,344 +176,412 @@ infinite-loop-website/
 ├── img/
 ├── js/
 ├── magnific-popup/
+├── screenshots/
 ├── slick/
-├── index.html
+├── .dockerignore
 ├── Dockerfile
 ├── Jenkinsfile
-├── .dockerignore
+├── LinkedIn-Post.txt
 ├── README.md
-└── screenshots/
+├── index.html
+└── sonar-project.properties
 ```
 
-The `screenshots/` folder in this documentation package contains the
-screenshots captured during the setup and verification process. Copy
-this folder into the root of your GitHub repository to make the images
-render in the README.
+This is a summary of the visible structure, not a complete listing.
 
-## Implementation walkthrough
+## Configuration
 
-### 1. Extract and inspect the ZIP
+### Jenkins
 
-The project was extracted locally and inspected. The source contained
-`index.html` and supporting folders for stylesheets, scripts, fonts, and
-images.
+-   Job: `infinite-loop-website-pipeline`
+-   The `Jenkinsfile` is stored in the GitHub repository.
+-   Under **Configure → Build Triggers**, enable **GitHub hook trigger
+    for GITScm polling**.
+-   Configure the SonarQube server in Jenkins and use
+    `withSonarQubeEnv('SonarQube')` for analysis.
+-   Keep credentials and tokens in Jenkins Credentials, not in source
+    files.
 
-``` bash
-ls
-```
+### SonarQube
 
-Expected key files/folders included:
+-   Jenkins server configuration name: `SonarQube`
+-   Project key observed: `infinite-loop-website`
+-   The Jenkins and SonarQube hosts communicated over the VPC private
+    network.
+-   Use the exact same project key in `sonar-project.properties` and
+    SonarQube. An earlier case-sensitive project-key mismatch caused an
+    analysis error before it was resolved.
 
-``` text
-css/  fontawesome-5.5/  img/  index.html  js/  magnific-popup/  slick/
-```
+### Dockerfile
 
-### 2. Initialize Git
-
-From the project root, initialize the repository and use `main` as the
-branch:
-
-``` bash
-git init
-git branch -M main
-git status
-git add .
-git commit -m "Initial commit: Infinite Loop website"
-```
-
-Git may show LF/CRLF line-ending warnings on Windows. These warnings are
-common when Git's line-ending settings differ from the files' current
-line endings; they are not necessarily errors and do not mean the files
-failed to stage.
-
-### 3. Create the GitHub repository and push
-
-Create an empty GitHub repository named `infinite-loop-website` under
-your GitHub account. Then connect the local repository and push the
-first commit:
-
-``` bash
-git remote add origin https://github.com/Rajesh-210/infinite-loop-website.git
-git push -u origin main
-```
-
-If `origin` already exists, check it before adding it again:
-
-``` bash
-git remote -v
-```
-
-### 4. Containerize the website
-
-The site is static, so Nginx can serve the HTML, CSS, JavaScript, fonts,
-and image assets. The Dockerfile copies the website files into the Nginx
-web root and exposes port 80 inside the container.
-
-Example Dockerfile:
+The observed Dockerfile:
 
 ``` dockerfile
 FROM nginx:alpine
-COPY . /usr/share/nginx/html
+RUN apk update && apk upgrade --no-cache
+COPY . /usr/share/nginx/html/
 EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
 ```
 
-A `.dockerignore` file helps keep unnecessary files out of the build
-context. For example:
+It uses Nginx Alpine, upgrades Alpine packages, copies the website into
+Nginx's document root, and runs Nginx in the foreground.
+
+## GitHub webhook
+
+The webhook is configured to send push events to Jenkins. A real push
+was confirmed by the Jenkins console output:
 
 ``` text
-.git
-.gitignore
-README.md
+Started by GitHub push by Rajesh-210
 ```
 
-If you want the README or screenshots served by the website, do not
-exclude them from the Docker build context---or adjust the ignore list
-to suit your goal.
+The log also showed Jenkins retrieving the `Jenkinsfile` and checking
+out the `main` branch commit with message `Update README.md`.
 
-### 5. Configure the Jenkins Pipeline
+### Setup checklist
 
-The Jenkins job was configured as a Pipeline and linked to the GitHub
-repository. The current pipeline stages visible in Jenkins are:
+1.  In Jenkins, open the pipeline job and select **Configure**.
+2.  Under **Build Triggers**, enable **GitHub hook trigger for GITScm
+    polling**.
+3.  In GitHub, open **Repository Settings → Webhooks** and add the
+    Jenkins webhook endpoint.
+4.  Use `application/json` and select the **push** event.
+5.  Confirm the webhook is active and inspect **Recent Deliveries**.
+6.  Push a small change and confirm Jenkins reports
+    `Started by GitHub push`.
 
-- Declarative: Checkout SCM
-- Checkout
-- Gitleaks Secret Scan
-- Validate Project
-- SonarQube Analysis
-- Quality Gate
-- Build Docker Image
-- Trivy Security Scan
-- Test Docker Image
-- Deploy Website
-- Declarative: Post Actions
+The initial `ping` delivery succeeded, and a real push event was
+subsequently confirmed.
 
-The pipeline definition is stored in `Jenkinsfile` and version-controlled with the website. Keep the documentation and screenshots aligned with the committed file.
+> **Security note:** The initial webhook endpoint used HTTP. For
+> production use, place Jenkins behind HTTPS and restrict inbound
+> access. Avoid exposing the Jenkins administrative interface broadly to
+> the internet.
 
-### 6. Configure the GitHub webhook (completed 27 October 2026)
+## Quality Gate test
 
-A webhook was configured in the GitHub repository `Rajesh-210/infinite-loop-website`. The repository's **Settings → Webhooks → Recent Deliveries** page showed a successful ping delivery. More importantly, a later Jenkins console log explicitly reported **“Started by GitHub push by Rajesh-210”**, and Jenkins checked out commit `4023bc3f67befa621fab9c2f3ab07279eabcdace` (`Update README.md`). This confirms that a GitHub push triggered the pipeline.
+Build #19 was used to test a deliberately failing Quality Gate. The
+analysis task completed, but the gate returned `ERROR`:
 
-The Jenkins webhook endpoint used for this integration is conventionally:
+``` text
+SonarQube task status is 'PENDING'
+SonarQube task status is 'SUCCESS'
+SonarQube task completed. Quality gate is 'ERROR'
+```
+
+This shows that the analysis task can succeed while the Quality Gate
+rejects the result. The later Docker build, Trivy scan, image test, and
+deployment stages were marked failed/skipped in the stage view.
+
+After restoring the normal Quality Gate, build #20 passed. Build #21,
+triggered by a GitHub push, also passed all displayed stages.
+
+When testing a deliberately failing gate: - Use a separate test Quality
+Gate where possible. - Record the original project gate before changing
+it. - Restore the original gate after the test. - Run a new build to
+verify the normal path.
+
+## Security reports
+
+The pipeline archives these reports:
+
+``` text
+reports/gitleaks-report.json
+reports/trivy-report.txt
+```
+
+-   **Gitleaks:** A previously archived report contained `[]`, meaning
+    that scan reported no findings in that run. This does not prove
+    secrets cannot exist elsewhere in the repository or its history.
+-   **Trivy:** Review the report for vulnerabilities and remediate
+    applicable findings. A green scan stage does not necessarily mean
+    the image has zero vulnerabilities; results depend on the scan
+    policy and exit-code configuration.
+
+Open the Jenkins build page and select the archived artifacts to inspect
+them.
+
+## Deployment verification
+
+After a successful run:
+
+1.  Confirm the **Deploy Website** stage is green.
+2.  Open the current website endpoint and check that the page loads.
+3.  Verify the latest code change is visible.
+4.  If the site is unavailable, inspect the running container, port
+    mapping, EC2 security group, firewall, and container logs.
+5.  Confirm both scan reports are archived.
+
+The website was previously tested on host port `8081`. Verify the
+current EC2 public IP and security-group rules before using an endpoint;
+public IPs may change.
+
+## Troubleshooting
+
+  -----------------------------------------------------------------------
+  Issue                               Observation / resolution
+  ----------------------------------- -----------------------------------
+  Jenkins could not access Docker     A Docker socket permission error
+                                      occurred. The Jenkins user was
+                                      added to the Docker group and
+                                      Jenkins restarted; image builds
+                                      then succeeded.
+
+  SonarQube authorization or          Align the Jenkins credential/server
+  project-key error                   configuration and exact project
+                                      key. Later analyses passed after
+                                      the configuration was corrected.
+
+  Quality Gate failure                Build #19 returned
+                                      `Quality gate is 'ERROR'`. This was
+                                      expected during the failure test;
+                                      restore the normal gate and rerun.
+
+  Webhook ping succeeded but build    A ping alone is insufficient.
+  did not trigger                     Verify a real push delivery and
+                                      look for `Started by GitHub push`
+                                      in Jenkins. This was subsequently
+                                      confirmed.
+
+  Website is unreachable              Check the deployment stage,
+                                      container status, port mapping,
+                                      security-group inbound rules, and
+                                      host firewall.
+
+  Scan results need investigation     Open the archived Gitleaks/Trivy
+                                      report and inspect the
+                                      corresponding build logs.
+  -----------------------------------------------------------------------
+
+## Security recommendations
+
+-   Use HTTPS for Jenkins and SonarQube where appropriate.
+-   Restrict administrative interfaces to trusted IPs, VPN, or private
+    networking.
+-   Store tokens in Jenkins Credentials; never commit secrets.
+-   Use least-privilege AWS IAM permissions.
+-   Do not expose the Docker daemon socket over an unauthenticated
+    network.
+-   Review Trivy findings and update base images regularly.
+-   Protect the default branch and require review for important changes.
+-   Back up Jenkins configuration and important SonarQube data.
+-   SonarQube displayed a warning that its embedded database is for
+    evaluation purposes. Consider a supported external database for
+    long-term or production use.
+-   Rotate any credential that may have been exposed in logs, files, or
+    screenshots.
+
+## Future improvements
+
+-   Configure HTTPS and tighter network access for Jenkins and
+    SonarQube.
+-   Add website tests and deployment health checks.
+-   Add notifications for failed builds and security findings.
+-   Tag images using the Git commit SHA and define a cleanup policy.
+-   Add rollback handling.
+-   Monitor EC2 health, disk usage, containers, and service
+    availability.
+-   Document recovery commands and maintain a sanitized architecture
+    diagram.
+
+## Verification summary
+
+  -----------------------------------------------------------------------
+  Build                               Result
+  ----------------------------------- -----------------------------------
+  #17                                 Successful pipeline run
+
+  #18                                 Successful pipeline run using the
+                                      normal Quality Gate
+
+  #19                                 Deliberate Quality Gate failure;
+                                      later delivery stages did not
+                                      proceed
+
+  #20                                 Successful run after restoring the
+                                      normal Quality Gate
+
+  #21                                 Triggered by GitHub push
+                                      (`Update README.md`); all displayed
+                                      stages passed
+  -----------------------------------------------------------------------
+
+These results reflect the environment at the time of testing. Re-run the
+pipeline after infrastructure, credentials, dependencies, or
+configuration change.
+
+------------------------------------------------------------------------
+
+**Maintainer:** Rajesh\
+**Repository:** https://github.com/Rajesh-210/infinite-loop-website
+
+
+## Work completed on 28 October 2026 — HTTPS, IAM, ECR, and CI/CD integration
+
+This section extends the previous project record rather than replacing the earlier setup notes.
+
+### 1. HTTPS certificate for the public IP
+
+The website was configured to serve HTTPS at `https://43.204.97.216`. This environment used a Let's Encrypt short-lived IP-address certificate (not a domain-name certificate). System Nginx listens on ports 80 and 443; HTTP redirects to HTTPS. Certbot was installed with Snap (observed version `5.8.0`), and its renewal timer was present. A `certbot renew --dry-run` check succeeded. At the time observed, the certificate expiry was around 4 November 2026, so renewal must remain automated.
+
+**Recorded certificate issuance procedure** (use the current public IP and confirm the Certbot version/profile options in the official documentation before repeating):
+
+1. Install Nginx and ensure it is active, with inbound TCP ports 80 and 443 allowed in the EC2 security group.
+2. Install Certbot using the supported Snap procedure for Ubuntu and verify `certbot --version`.
+3. Ensure the ACME webroot exists and is served over HTTP:
+
+   ```bash
+   sudo mkdir -p /var/www/html/.well-known/acme-challenge
+   echo acme-test | sudo tee /var/www/html/.well-known/acme-challenge/test-file
+   curl http://43.204.97.216/.well-known/acme-challenge/test-file
+   ```
+
+   The challenge URL must return the test text before certificate issuance. Remove the test file after testing.
+
+4. The command used in this project to request the short-lived IP certificate was:
+
+   ```bash
+   sudo certbot certonly --preferred-profile shortlived \\
+     --webroot --webroot-path /var/www/html \\
+     --ip-address 43.204.97.216
+   ```
+
+5. Configure Nginx to use the certificate and private key paths reported by Certbot. Keep the HTTP server able to serve `/.well-known/acme-challenge/` from `/var/www/html` while redirecting other HTTP requests to HTTPS. Validate and reload Nginx only after confirming the config:
+
+   ```bash
+   sudo nginx -t
+   sudo systemctl reload nginx
+   ```
+
+6. Verify HTTPS and the redirect:
+
+   ```bash
+   curl -I http://43.204.97.216
+   curl -I https://43.204.97.216
+   sudo certbot certificates
+   sudo certbot renew --dry-run
+   systemctl list-timers | grep -i certbot
+   ```
+
+   The observed HTTPS response was `HTTP/1.1 200 OK`; the browser showed the connection as secure. The renewal dry run passed.
+
+**Renewal warning:** IP certificates issued with the short-lived profile expire quickly (the observed certificate had roughly a one-week validity). Do not rely on manual renewal. Confirm the Certbot timer is enabled and monitor renewal logs. Do not delete or overwrite certificate files manually. Certificate options and eligibility can change; consult [Certbot documentation](https://certbot.eff.org/) and [Let's Encrypt documentation](https://letsencrypt.org/docs/) before repeating these steps.
+
+### 2. AWS CLI and IAM role troubleshooting
+
+- Installed AWS CLI v2; observed version: `aws-cli/2.39.0`.
+- Initially `aws` was not installed; after installation, STS returned `NoCredentials`.
+- Created/attached the EC2 IAM role `Image-push`, allowing the instance to obtain temporary credentials from the EC2 role rather than storing long-lived AWS access keys.
+- Verified from the Ubuntu user and from the Jenkins service user:
+
+  ```bash
+  aws sts get-caller-identity
+  sudo -u jenkins aws sts get-caller-identity
+  ```
+
+  Both identified AWS account `463771485942` and the assumed role `Image-push`.
+- Set the region to `ap-south-1`. `aws ecr describe-repositories` initially returned an empty repository list, which was expected because the repository did not yet exist.
+- Repository creation first failed with `AccessDeniedException` because the role lacked `ecr:CreateRepository`. Added a small inline policy allowing `ecr:CreateRepository`, then creation succeeded. The role also has `AmazonEC2ContainerRegistryPowerUser` for repository image operations. The policy should be reviewed and narrowed to the project’s needs where practical. Do not attach all three ECR Public policies for this private-repository workflow.
+
+### 3. Created private ECR repository and pushed image 6
+
+Repository settings:
 
 ```text
-http://<JENKINS-REACHABLE-HOST>:8080/github-webhook/
+Region:          ap-south-1
+Repository:      infinite-loop-website
+Repository URI:  463771485942.dkr.ecr.ap-south-1.amazonaws.com/infinite-loop-website
+Image scanning:  scanOnPush=true
+Encryption:      AES256
 ```
 
-Use the actual URL configured in the repository's webhook settings; do not assume the example above proves which exact URL is saved. Jenkins must be reachable from GitHub on the configured endpoint. Restrict network access appropriately and avoid exposing Jenkins broadly to the internet. SCM polling may remain enabled as a fallback if desired.
+The local image `infinite-loop-website:6` was tagged and pushed as `:6` and `:latest`. Both tags resolved to digest `sha256:912ee9b87142065653b129ca5348d168ce84adb6d359ed874f332316c82e75b5`.
 
-### 7. Deploy and verify on EC2
+Example commands used:
 
-The deployed container was named `infinite-loop-website`, built from an
-image tag such as `infinite-loop-website:5`, and mapped from EC2 host
-port `8081` to Nginx container port `80`.
+```bash
+aws ecr get-login-password --region ap-south-1 | \\
+  sudo docker login --username AWS --password-stdin \\
+  463771485942.dkr.ecr.ap-south-1.amazonaws.com
 
-Check the container:
-
-``` bash
-sudo docker ps
+sudo docker tag infinite-loop-website:6 \\
+  463771485942.dkr.ecr.ap-south-1.amazonaws.com/infinite-loop-website:6
+sudo docker push \\
+  463771485942.dkr.ecr.ap-south-1.amazonaws.com/infinite-loop-website:6
 ```
 
-Check the HTTP response on the EC2 instance:
+### 4. Jenkins integration with private ECR
 
-``` bash
-curl -I http://localhost:8081
+The Jenkins service runs as Linux user `jenkins`, which belongs to the `docker` group. These checks passed:
+
+```bash
+ps -o user,group,comm -C java
+sudo -u jenkins aws sts get-caller-identity
+sudo -u jenkins docker ps
+id jenkins
 ```
 
-The observed response was:
+The existing Jenkinsfile was updated to add the **Push Image to Amazon ECR** stage after image scanning and testing. It authenticates with `aws ecr get-login-password`, tags the build-number image (Jenkins build `#7` produced tag `:7`), and pushes both `:7` and `:latest`. The deployment stage uses the versioned image and verifies HTTP and HTTPS. The `Deploy and Verify` stage retains an attempt to restart the previous local image if verification fails.
 
-``` text
-HTTP/1.1 200 OK
-Server: nginx
-Content-Type: text/html
+**Important operational note:** Docker printed a warning that credentials were stored unencrypted in `/var/lib/jenkins/.docker/config.json`. Login succeeded, but consider configuring a supported Docker credential helper and ensure the Jenkins home directory is appropriately protected. ECR authorization tokens are temporary; the pipeline logs in at push time.
+
+### 5. Build #7 verification
+
+Jenkins build `#7` was green. The displayed stages passed: Checkout, Gitleaks Secret Scan, Validate Project, SonarQube Analysis, Quality Gate, Build Docker Image, Trivy Security Scan, Test Docker Image, Push Image to Amazon ECR, Deploy and Verify, and post actions. The SonarQube Quality Gate was shown as **Passed** with server-side processing **Success**.
+
+ECR showed tags `7`, `latest`, and `6`. Build #7 pushed tags `7` and `latest` with digest:
+
+```text
+sha256:538be18c6e781c61db6a1f226c10624a4ee22f855dbd39e300fe4172851b8cf5
 ```
 
-You can also check the page HTML:
+The repository also showed untagged image artifacts/digests. They have not been deleted; review them before setting an ECR lifecycle policy.
 
-``` bash
-curl -s http://localhost:8081 | grep -i "Infinite Loop"
-```
+### 6. Rollback test status
 
-Open the website using:
+An isolated rollback test was performed using a temporary container on port `18081`. It simulated a failed health check, restored `infinite-loop-website:3`, and reported `ROLLBACK TEST SUCCESSFUL`. The live website container remained `infinite-loop-website:6` at that time and the HTTPS check returned `200 OK`. This verifies the isolated rollback procedure, but **does not prove that Jenkins’ full automatic rollback path has been triggered by a real failed deployment**. A controlled Jenkins rollback test remains a future task.
 
-``` text
-http://<EC2-PUBLIC-IP>:8081
-```
+### 7. Screenshots and evidence
 
-The public IP and port above are specific to the demonstrated deployment
-and may change if the instance is stopped/replaced or the networking
-configuration changes.
+The `screenshots/` directory in the documentation package contains the earlier setup evidence plus the latest screenshots:
 
-## Work completed on 27 October 2026
+- `jenkins-pipeline-build-7.png` — Jenkins build #7 with ECR push and deployment stages green.
+- `ecr-images-build-7.png` — ECR repository showing tags `7`, `latest`, and `6`.
+- `iam-image-push-role.png` — IAM role with `AmazonEC2ContainerRegistryPowerUser` attached.
+- Earlier screenshots cover GitHub, Jenkins, SonarQube, Quality Gate testing, and project setup.
 
-This section records the additional CI/CD work completed today, beyond the initial website container deployment.
+### Latest evidence screenshots
 
-### 1. Added security and code-quality stages
+**Jenkins build #7 — ECR push and deployment passed**
 
-The Jenkins pipeline was extended to run Gitleaks, SonarQube analysis, a SonarQube Quality Gate check, and Trivy image scanning. Successful builds also run the Docker image test and deploy the website. The successful Jenkins stage view shows all these stages completing in sequence.
+![Jenkins build 7 pipeline stages](screenshots/jenkins-pipeline-build-7.png)
 
-Gitleaks and Trivy reports are archived as build artifacts:
+**Amazon ECR — versioned tags**
 
-- `reports/gitleaks-report.json`
-- `reports/trivy-report.txt`
+![ECR image tags](screenshots/ecr-images-build-7.png)
 
-The observed Gitleaks report contained `[]` for that scan. This means the scan reported no findings in that run; it is not a guarantee that secrets can never exist elsewhere.
+**IAM role permissions**
 
-### 2. Connected Jenkins to SonarQube
+![Image-push IAM role](screenshots/iam-image-push-role.png)
 
-The SonarQube server configured in Jenkins is named `SonarQube` and is reachable from the Jenkins host over the private VPC address `http://172.31.13.35:9000`. Jenkins reached the SonarQube API and received status `UP`. The project key is `infinite-loop-website`.
+For GitHub rendering, preserve the relative `screenshots/...` paths and commit the screenshot folder alongside this README.
 
-The SonarQube Analysis stage completes and the Quality Gate stage uses:
+## Updated troubleshooting record
 
-```groovy
-timeout(time: 5, unit: 'MINUTES') {
-    waitForQualityGate abortPipeline: true
-}
-```
+| Issue | Cause | Resolution / status |
+|---|---|---|
+| `aws: command not found` | AWS CLI was absent | Installed AWS CLI v2 and verified version. |
+| STS `NoCredentials` | No EC2 role credentials were available at first | Attached/used EC2 role `Image-push`; STS worked for both Ubuntu and Jenkins users. |
+| `ecr:CreateRepository` AccessDenied | Role lacked repository-creation permission | Added inline `ecr:CreateRepository` permission; repository creation succeeded. |
+| ECR repository list empty | No private repository existed yet in `ap-south-1` | Created `infinite-loop-website`. |
+| Docker credential storage warning | Docker CLI stores login data in config without a credential helper | Login and push succeeded; credential-helper hardening remains recommended. |
+| Initial container health check connection reset | Container was still starting | Pipeline retries health checks; subsequent HTTP and HTTPS checks passed. |
 
-This causes the pipeline to stop when SonarQube reports a failed Quality Gate, rather than continuing to build and deploy an image.
+## Next session checklist
 
-### 3. Tested a Quality Gate failure
-
-A deliberate failure test was run to confirm the gate protects deployment. Jenkins build **#19** showed the Quality Gate stage failing; the downstream **Build Docker Image**, **Trivy Security Scan**, **Test Docker Image**, and **Deploy Website** stages were skipped/marked failed as a consequence of the aborted pipeline. This was a controlled test, not a normal successful deployment.
-
-The subsequent build **#20** passed. After a GitHub push, build **#21** was shown in Jenkins as successful, and its console output began with **“Started by GitHub push by Rajesh-210”**. This is evidence both that the webhook trigger worked and that the pipeline returned to a successful state after the test. Ensure the normal intended Quality Gate is selected in SonarQube after any deliberate test configuration; do not leave an intentionally failing gate active.
-
-### 4. Build evidence observed
-
-- **Build #19:** intentional Quality Gate failure test; later stages did not deploy.
-- **Build #20:** successful pipeline run after the test.
-- **Build #21:** successful run triggered by a GitHub push.
-- **SonarQube project:** `Infinite Loop Website`; dashboard showed approximately 4.2k lines of code, 10 open issues, 2 security issues, and 0.0% coverage at the time of the screenshot. These are snapshot values and can change after future analyses.
-
-## Troubleshooting notes
-
-### Git line-ending warnings on Windows
-
-**Symptom:** Git warns that LF may be replaced by CRLF.
-
-**What it means:** Git is informing you about line-ending conversion on
-Windows. If the files stage and commit successfully, the warning alone
-is not a failure.
-
-### Jenkins build failures in Docker stages
-
-**Approach:** Open the failed build in Jenkins and inspect **Console
-Output**. Identify the first failing command in the
-`Build Docker Image`, `Test Docker Image`, or `Deploy Website` stage
-rather than relying only on the stage summary.
-
-### Verify the new version is live
-
-**Approach:** Check the image and container with `sudo docker ps`, then
-request the local site with `curl`. If the page is correct in `curl` but
-appears stale in the browser, try a hard refresh (`Ctrl + F5`).
-
-### Port and security group
-
-The EC2 security group must allow inbound TCP traffic on the port used
-by the browser (8081 in this project). Restrict access to trusted IP
-ranges where practical. Do not expose Jenkins publicly without
-appropriate access controls, and never commit credentials or access
-tokens to GitHub.
-
-## Security and production-readiness checklist
-
--   [x] Configure and verify GitHub push triggering for Jenkins (27 October 2026); review webhook security and network restrictions periodically.
--   [ ] Store credentials in Jenkins Credentials, not in the
-    `Jenkinsfile`.
--   [ ] Restrict inbound access to EC2 and Jenkins.
--   [ ] Use HTTPS with a domain name and a reverse proxy or load
-    balancer.
--   [ ] Add a deployment health check and rollback strategy.
--   [ ] Clean up unused Docker images safely.
--   [ ] Add a `.gitignore` and ensure no secrets are committed.
--   [ ] Pin and update base images according to a maintenance policy.
-
-## Screenshots
-
-The screenshots below document repository creation, local Git setup, the
-website in the browser, Jenkins stages/build history/configuration, and
-the EC2 Docker verification. Image files are stored in `screenshots/`.
-
-### Evidence: step-01.png
-
-![Project evidence](screenshots/step-01.png)
-
-### Evidence: step-02.png
-
-![Project evidence](screenshots/step-02.png)
-
-### Evidence: step-03.png
-
-![Project evidence](screenshots/step-03.png)
-
-### Evidence: step-04.png
-
-![Project evidence](screenshots/step-04.png)
-
-### Evidence: step-05.png
-
-![Project evidence](screenshots/step-05.png)
-
-### Evidence: step-06.png
-
-![Project evidence](screenshots/step-06.png)
-
-### Evidence: step-07.png
-
-![Project evidence](screenshots/step-07.png)
-
-### Evidence: step-08.png
-
-![Project evidence](screenshots/step-08.png)
-
-### Evidence: step-09.png
-
-![Project evidence](screenshots/step-09.png)
-
-### Evidence: step-10.png
-
-![Project evidence](screenshots/step-10.png)
-
-### Current-day evidence screenshots (27 October 2026)
-
-**GitHub repository and current files**
-
-![GitHub repository](screenshots/github-repository.png)
-
-**GitHub webhook recent deliveries**
-
-![GitHub webhook deliveries](screenshots/github-webhook-deliveries.png)
-
-**Jenkins build history, including builds #19, #20 and #21**
-
-![Jenkins build history](screenshots/jenkins-build-history.png)
-
-**Successful pipeline with security and Quality Gate stages**
-
-![Successful Jenkins pipeline](screenshots/jenkins-successful-pipeline.png)
-
-**SonarQube project dashboard**
-
-![SonarQube project dashboard](screenshots/sonarqube-project-dashboard.png)
-
-**Deliberate Quality Gate failure test**
-
-![Quality Gate failure test](screenshots/quality-gate-failure-test.png)
-
-**Quality Gate failure log**
-
-![Quality Gate failure log](screenshots/quality-gate-failure-log.png)
-
-## Outcome
-
-This project now demonstrates an end-to-end CI/CD workflow from a GitHub push through Jenkins, secret scanning, project validation, SonarQube analysis and Quality Gate enforcement, Docker image creation, Trivy scanning, image testing, and deployment of the Nginx website on AWS EC2. The 27 October 2026 work also verified that a deliberate Quality Gate failure stops downstream deployment stages and that a later GitHub push can trigger a successful pipeline run.
-
-The key learning was not just running a container---it was connecting
-source control, automated validation, image creation, deployment, and
-verification into a repeatable workflow.
-
-## Author
-
-**Rajesh Chilukuri**\
-DevOps \| Git \| Jenkins \| Docker \| AWS EC2 \| Nginx
+1. Review untagged ECR images and decide on a conservative lifecycle policy; do not expire the currently deployed or rollback-required image.
+2. Consider configuring a Docker credential helper for Jenkins.
+3. Perform a carefully controlled Jenkins deployment-failure test and confirm automatic rollback end to end.
+4. Recheck Certbot timer, certificate expiry, `sudo certbot renew --dry-run`, and HTTPS response.
+5. Continue monitoring storage, disk space, and scan findings.
