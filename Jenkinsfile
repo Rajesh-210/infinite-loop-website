@@ -11,7 +11,7 @@ pipeline {
         IMAGE_NAME     = 'infinite-loop-website'
         CONTAINER_NAME = 'infinite-loop-website'
         HOST_PORT      = '8081'
-        WEBSITE_IP     = '43.204.97.216'
+        WEBSITE_IP     = '15.206.149.132'
         AWS_REGION     = 'ap-south-1'
         AWS_ACCOUNT_ID = '463771485942'
         ECR_REPOSITORY = 'infinite-loop-website'
