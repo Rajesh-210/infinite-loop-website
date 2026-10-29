@@ -215,7 +215,7 @@ pipeline {
                     echo "New image: ${NEW_IMAGE}"
 
                     # Detect the currently active Nginx upstream.
-                    ACTIVE_PORT=$(sudo -n grep -oE \
+                    ACTIVE_PORT=$(grep -oE \
                         'proxy_pass http://127[.]0[.]0[.]1:(8081|8082);' \
                         "$NGINX_SITE" |
                         head -n 1 |
