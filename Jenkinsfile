@@ -201,123 +201,146 @@ pipeline {
             }
         }
 
+        // UPDATED STAGE: BLUE-GREEN DEPLOYMENT AND VERIFICATION
         stage('Deploy and Verify') {
             steps {
                 sh '''
                     set -eu
 
                     NEW_IMAGE="${ECR_IMAGE}:${BUILD_NUMBER}"
+                    BLUE_CONTAINER="infinite-loop-website"
+                    GREEN_CONTAINER="infinite-loop-green"
+                    NGINX_SITE="/etc/nginx/sites-available/default"
 
-                    echo "New image: $NEW_IMAGE"
+                    echo "New image: ${NEW_IMAGE}"
 
-                    # Remember the image used by the existing container before replacing it.
-                    PREVIOUS_IMAGE=$(docker inspect \
-                        --format='{{.Config.Image}}' \
-                        "$CONTAINER_NAME" 2>/dev/null || true)
+                    # Detect the currently active Nginx upstream.
+                    ACTIVE_PORT=$(sudo -n grep -oE \
+                        'proxy_pass http://127[.]0[.]0[.]1:(8081|8082);' \
+                        "$NGINX_SITE" |
+                        head -n 1 |
+                        grep -oE '8081|8082' || true)
 
-                    if [ -n "$PREVIOUS_IMAGE" ]; then
-                        echo "Previous image: $PREVIOUS_IMAGE"
-                    else
-                        echo "No previous container found."
-                    fi
-
-                    rollback() {
-                        echo "ERROR: Deployment verification failed."
-                        echo "Attempting rollback..."
-
-                        docker rm -f "$CONTAINER_NAME" \
-                            >/dev/null 2>&1 || true
-
-                        if [ -z "$PREVIOUS_IMAGE" ]; then
-                            echo "No previous image available for rollback."
-                            return 1
-                        fi
-
-                        if ! docker image inspect "$PREVIOUS_IMAGE" \
-                            >/dev/null 2>&1; then
-                            echo "Previous image is unavailable."
-                            return 1
-                        fi
-
-                        if ! docker run -d \
-                            --restart unless-stopped \
-                            --name "$CONTAINER_NAME" \
-                            -p "${HOST_PORT}:80" \
-                            "$PREVIOUS_IMAGE"; then
-
-                            echo "ERROR: Could not restart previous image."
-                            return 1
-                        fi
-
-                        echo "Previous container restarted."
-                        return 0
-                    }
-
-                    # Remove the old container only after saving its image.
-                    docker rm -f "$CONTAINER_NAME" \
-                        >/dev/null 2>&1 || true
-
-                    # Start the new container.
-                    if ! docker run -d \
-                        --restart unless-stopped \
-                        --name "$CONTAINER_NAME" \
-                        -p "${HOST_PORT}:80" \
-                        "$NEW_IMAGE"; then
-
-                        rollback || true
+                    if [ "$ACTIVE_PORT" != "8081" ] && [ "$ACTIVE_PORT" != "8082" ]; then
+                        echo "ERROR: Could not determine active Nginx upstream."
                         exit 1
                     fi
 
-                    echo "New container started. Checking application..."
+                    # Select the inactive deployment slot.
+                    if [ "$ACTIVE_PORT" = "8081" ]; then
+                        TARGET_PORT="8082"
+                        TARGET_CONTAINER="$GREEN_CONTAINER"
+                        ACTIVE_CONTAINER="$BLUE_CONTAINER"
+                    else
+                        TARGET_PORT="8081"
+                        TARGET_CONTAINER="$BLUE_CONTAINER"
+                        ACTIVE_CONTAINER="$GREEN_CONTAINER"
+                    fi
 
-                    HEALTHY=false
+                    echo "Active production port: ${ACTIVE_PORT}"
+                    echo "Candidate port: ${TARGET_PORT}"
+                    echo "Candidate container: ${TARGET_CONTAINER}"
 
-                    # Verify the application directly through Docker's host port.
+                    # Save the image used by the active production container.
+                    PREVIOUS_IMAGE=$(docker inspect \
+                        --format='{{.Config.Image}}' \
+                        "$ACTIVE_CONTAINER" 2>/dev/null || true)
+
+                    echo "Previous production container: ${ACTIVE_CONTAINER}"
+                    echo "Previous production image: ${PREVIOUS_IMAGE:-unknown}"
+
+                    # Remove only the inactive candidate slot.
+                    # The current production container remains running.
+                    docker rm -f "$TARGET_CONTAINER" \
+                        >/dev/null 2>&1 || true
+
+                    # Start the candidate container.
+                    if ! docker run -d \
+                        --restart unless-stopped \
+                        --name "$TARGET_CONTAINER" \
+                        -p "127.0.0.1:${TARGET_PORT}:80" \
+                        "$NEW_IMAGE"; then
+
+                        echo "ERROR: Candidate container failed to start."
+                        exit 1
+                    fi
+
+                    # Verify candidate HTTP health before switching traffic.
+                    CANDIDATE_HEALTHY=false
+
                     for i in $(seq 1 20); do
-                        if curl -fsS \
-                            "http://127.0.0.1:${HOST_PORT}/" \
+                        if curl --connect-timeout 3 --max-time 5 -fsS \
+                            "http://127.0.0.1:${TARGET_PORT}/" \
                             -o /dev/null; then
 
-                            echo "Direct HTTP health check passed."
-                            HEALTHY=true
+                            echo "Candidate HTTP health check passed."
+                            CANDIDATE_HEALTHY=true
                             break
                         fi
 
-                        echo "Waiting for application... attempt $i/20"
+                        echo "Waiting for candidate... attempt ${i}/20"
                         sleep 3
                     done
 
-                    # Verify HTTPS through the existing Nginx reverse proxy.
-                    if [ "$HEALTHY" = "true" ]; then
-                        HTTPS_HEALTHY=false
+                    if [ "$CANDIDATE_HEALTHY" != "true" ]; then
+                        echo "ERROR: Candidate failed health checks."
 
-                        for i in $(seq 1 10); do
-                            if curl -kfsS \
-                                --resolve "${WEBSITE_IP}:443:127.0.0.1" \
-                                "https://${WEBSITE_IP}/" \
-                                -o /dev/null; then
+                        docker logs "$TARGET_CONTAINER" || true
 
-                                echo "HTTPS health check passed."
-                                HTTPS_HEALTHY=true
-                                break
-                            fi
+                        docker rm -f "$TARGET_CONTAINER" \
+                            >/dev/null 2>&1 || true
 
-                            echo "Waiting for HTTPS verification..."
-                            sleep 3
-                        done
-
-                        if [ "$HTTPS_HEALTHY" != "true" ]; then
-                            HEALTHY=false
-                        fi
-                    fi
-
-                    # Restore the previous image if either check fails.
-                    if [ "$HEALTHY" != "true" ]; then
-                        rollback
                         exit 1
                     fi
 
-                    echo "Deployment and health checks completed successfully."
+                    # Switch Nginx only after candidate health succeeds.
+                    if ! sudo -n /usr/local/sbin/switch-website-upstream \
+                        "$TARGET_PORT"; then
+
+                        echo "ERROR: Nginx switch failed."
+                        echo "Attempting to restore the previous production upstream."
+
+                        if ! sudo -n /usr/local/sbin/switch-website-upstream \
+                            "$ACTIVE_PORT"; then
+
+                            echo "CRITICAL: Nginx rollback failed."
+                            echo "Candidate retained for troubleshooting: ${TARGET_CONTAINER}"
+                            exit 1
+                        fi
+
+                        docker rm -f "$TARGET_CONTAINER" \
+                            >/dev/null 2>&1 || true
+
+                        exit 1
+                    fi
+
+                    # Perform an additional HTTPS verification through Nginx.
+                    if ! curl --connect-timeout 5 --max-time 10 -kfsS \
+                        --resolve "${WEBSITE_IP}:443:127.0.0.1" \
+                        "https://${WEBSITE_IP}/" \
+                        -o /dev/null; then
+
+                        echo "ERROR: Post-switch HTTPS verification failed."
+                        echo "Switching back to the previous production port."
+
+                        if ! sudo -n /usr/local/sbin/switch-website-upstream \
+                            "$ACTIVE_PORT"; then
+
+                            echo "CRITICAL: Nginx rollback failed."
+                            echo "Candidate retained for troubleshooting: ${TARGET_CONTAINER}"
+                            exit 1
+                        fi
+
+                        docker rm -f "$TARGET_CONTAINER" \
+                            >/dev/null 2>&1 || true
+
+                        exit 1
+                    fi
+
+                    echo "SUCCESS: Blue-Green deployment completed."
+                    echo "Active production port: ${TARGET_PORT}"
+                    echo "Previous production port: ${ACTIVE_PORT}"
+                    echo "Previous production container retained: ${ACTIVE_CONTAINER}"
                 '''
             }
         }
