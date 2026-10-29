@@ -585,3 +585,228 @@ For GitHub rendering, preserve the relative `screenshots/...` paths and commit t
 3. Perform a carefully controlled Jenkins deployment-failure test and confirm automatic rollback end to end.
 4. Recheck Certbot timer, certificate expiry, `sudo certbot renew --dry-run`, and HTTPS response.
 5. Continue monitoring storage, disk space, and scan findings.
+
+
+---
+
+# Work completed on 29 October 2026 — Blue-Green deployment and rollback verification
+
+This section extends the existing project history. The current configuration below supersedes earlier endpoint/port snapshots where they differ. Public IP addresses are ephemeral in this practice environment and can change after an EC2 stop/start.
+
+## 1. Current observed environment (29 October 2026)
+
+| Item | Current observed value |
+|---|---|
+| GitHub repository | `Rajesh-210/infinite-loop-website` |
+| Jenkins pipeline | `infinite-loop-website-pipeline` |
+| AWS Region | `ap-south-1` (Mumbai) |
+| AWS account | `463771485942` |
+| Website/Jenkins EC2 public IP observed today | `15.206.149.132` |
+| Website/Jenkins EC2 private IP observed today | `172.31.15.124` |
+| SonarQube EC2 public IP observed in this session | `15.206.210.167` |
+| SonarQube EC2 private IP observed in this session | `172.31.5.173` |
+| Jenkins UI | Port `8080` (restrict access) |
+| SonarQube UI | Port `9000` (restrict access; Jenkins uses private IP) |
+| Current production image | `463771485942.dkr.ecr.ap-south-1.amazonaws.com/infinite-loop-website:9` |
+| Current active production port | `8082` (Green) |
+| Previous retained container | `infinite-loop-website`, image `:8`, port `8081` (Blue) |
+| HTTPS URL tested | `https://15.206.149.132` |
+
+Do not assume these addresses will remain the same. Confirm the EC2 public/private IPs and update the Jenkinsfile's `WEBSITE_IP`, Nginx certificate paths, webhook settings, and other dependent configuration if the public IP changes. The current HTTPS check used `curl -k`, which skips certificate trust/hostname verification; use a normal `curl -I https://<current-endpoint>` check to validate certificate trust as well.
+
+## 2. Updated architecture and deployment flow
+
+```mermaid
+flowchart TD
+    A[Developer pushes change] --> B[GitHub repository: main]
+    B --> C[GitHub webhook / Jenkins SCM trigger]
+    C --> D[Jenkins Pipeline on EC2]
+    D --> E[Checkout]
+    E --> F[Gitleaks secret scan]
+    F --> G[Validate project]
+    G --> H[SonarQube analysis]
+    H --> I{Quality Gate passed?}
+    I -- No --> STOP[Stop pipeline; no image deployment]
+    I -- Yes --> J[Build Docker image]
+    J --> K[Trivy vulnerability scan]
+    K --> L[Test temporary container]
+    L --> M[Authenticate using EC2 IAM role Image-push]
+    M --> N[Push build tag and latest to private ECR]
+    N --> O[Start candidate container on inactive loopback port]
+    O --> P[HTTP candidate health checks]
+    P --> Q{Candidate healthy?}
+    Q -- No --> CLEAN[Remove failed candidate; retain production]
+    Q -- Yes --> R[Restricted Nginx switch script]
+    R --> S[nginx -t and reload]
+    S --> T[HTTPS health check]
+    T --> U{HTTPS passes?}
+    U -- Yes --> V[New slot serves production traffic]
+    U -- No --> W[Switch Nginx back to previous port]
+    W --> X[Retain candidate if rollback fails; investigate]
+    D --> Y[Archive Gitleaks and Trivy reports]
+```
+
+### Blue-Green port map
+
+| Slot | Container name | Host binding | Image during Build #9 | Role after Build #9 |
+|---|---|---|---|---|
+| Blue | `infinite-loop-website` | `0.0.0.0:8081->80` | `:8` | Previous/rollback slot |
+| Green | `infinite-loop-green` | `127.0.0.1:8082->80` | `:9` | Active production slot |
+
+The candidate container binds to loopback, so it is reached through local health checks and system Nginx rather than directly through a public host port. Nginx terminates HTTPS and proxies to the active slot. Both containers remain running after a successful switch so the previous slot can be restored quickly.
+
+## 3. Jenkins Build #9 — successful Blue-Green deployment
+
+On 29 October 2026, Jenkins Build `#9` completed all displayed stages successfully:
+
+1. Checkout
+2. Gitleaks Secret Scan
+3. Validate Project
+4. SonarQube Analysis
+5. Quality Gate
+6. Build Docker Image
+7. Trivy Security Scan
+8. Test Docker Image
+9. Push Image to Amazon ECR
+10. Deploy and Verify
+11. Declarative: Post Actions
+
+The deploy stage detected Nginx's active port as `8081`, selected port `8082` for Green, pulled/used the versioned ECR image `:9`, started `infinite-loop-green`, and checked `http://127.0.0.1:8082/`. The first request received `curl: (56) Recv failure: Connection reset by peer` while the container was starting; the retry loop succeeded on the next attempt. The pipeline then ran the restricted Nginx switch script and passed the HTTPS verification.
+
+Key final console output:
+
+```text
+Candidate HTTP health check passed.
+SUCCESS: Nginx switched to port 8082.
+SUCCESS: HTTPS health check passed.
+SUCCESS: Blue-Green deployment completed.
+Active production port: 8082
+Previous production port: 8081
+Previous production container retained: infinite-loop-website
+```
+
+## 4. Active port detection fix
+
+The deploy stage reads the Nginx site configuration as the `jenkins` user. The `NGINX_SITE` variable is defined inside the Jenkins shell stage:
+
+```bash
+NGINX_SITE="/etc/nginx/sites-available/default"
+
+ACTIVE_PORT=$(grep -oE \
+    'proxy_pass http://127[.]0[.]0[.]1:(8081|8082);' \
+    "$NGINX_SITE" |
+    head -n 1 |
+    grep -oE '8081|8082' || true)
+
+if [ "$ACTIVE_PORT" != "8081" ] && [ "$ACTIVE_PORT" != "8082" ]; then
+    echo "ERROR: Could not determine active Nginx upstream."
+    exit 1
+fi
+```
+
+The important correction was removing `sudo -n` from the `grep` command. The config file is world-readable (`-rw-r--r--`), and the test as user `jenkins` returned `8081`. In an interactive shell, set `NGINX_SITE` first; otherwise `$NGINX_SITE` is empty and `grep` reports a missing filename.
+
+Keep `sudo -n` on calls to the approved switch script. Do not add unrestricted sudo access for Jenkins.
+
+## 5. Restricted Nginx switch and rollback controls
+
+The root-owned helper `/usr/local/sbin/switch-website-upstream` accepts only port `8081` or `8082`. It checks candidate HTTP health, updates the configured upstream, runs `nginx -t`, reloads Nginx, verifies HTTPS, and restores its prior config if verification fails.
+
+The Jenkins sudoers allowlist is intentionally narrow:
+
+```text
+jenkins ALL=(root) NOPASSWD: /usr/local/sbin/switch-website-upstream 8081
+jenkins ALL=(root) NOPASSWD: /usr/local/sbin/switch-website-upstream 8082
+```
+
+Observed permissions: the script is owned by `root:root` and mode `750`; the sudoers file is mode `0440` and passed `visudo -cf` validation. Review these values on the actual server before changing them. The Jenkins user should not have arbitrary root access.
+
+## 6. Manual rollback test and restoration
+
+A manual switch to Blue was performed:
+
+```bash
+sudo /usr/local/sbin/switch-website-upstream 8081
+```
+
+Output confirmed:
+
+```text
+Health check passed for port 8081.
+SUCCESS: Nginx switched to port 8081.
+SUCCESS: HTTPS health check passed.
+```
+
+Then the active upstream and HTTPS endpoint were checked:
+
+```bash
+sudo grep -n "proxy_pass" /etc/nginx/sites-available/default
+curl -k -I --max-time 10 https://15.206.149.132
+```
+
+Observed upstream: `proxy_pass http://127.0.0.1:8081;`; HTTPS returned `HTTP/1.1 200 OK`. Traffic was then restored to Green:
+
+```bash
+sudo /usr/local/sbin/switch-website-upstream 8082
+```
+
+The final output again confirmed the health check, successful Nginx config test, switch to `8082`, and HTTPS health check. Therefore the manual traffic-switch and restore sequence passed. This was a manual rollback-path test; it should not be described as a Jenkins deployment that actually failed and automatically rolled back end-to-end.
+
+## 7. Final runtime verification commands
+
+These checks were run after Build #9 and after restoring Green:
+
+```bash
+# Container status and published ports
+sudo docker ps --filter "name=infinite-loop"
+
+# Current Nginx upstream
+sudo grep -n "proxy_pass" /etc/nginx/sites-available/default
+
+# HTTPS endpoint (the -k flag skips certificate validation)
+curl -k -I --max-time 10 https://15.206.149.132
+```
+
+Observed containers:
+
+```text
+infinite-loop-green   .../infinite-loop-website:9   127.0.0.1:8082->80/tcp
+infinite-loop-website .../infinite-loop-website:8   0.0.0.0:8081->80/tcp
+```
+
+Observed Nginx upstream after final restoration: `127.0.0.1:8082`. HTTPS returned `HTTP/1.1 200 OK`.
+
+## 8. Screenshot evidence added for 29 October
+
+The screenshot `screenshots/jenkins-build-9-blue-green-pipeline.png` records the Jenkins job page with Build #9 and the Green stage cells. Earlier screenshots in this package remain included to preserve the existing setup, GitHub, SonarQube, Quality Gate, IAM, and ECR evidence.
+
+![Jenkins Build 9 Blue-Green pipeline](screenshots/jenkins-build-9-blue-green-pipeline.png)
+
+## 9. Issues encountered today and resolutions
+
+| Issue | Cause | Resolution / verified result |
+|---|---|---|
+| `grep: : No such file or directory` in an interactive test | `NGINX_SITE` was not set in that shell | Set `NGINX_SITE=/etc/nginx/sites-available/default`; active port detected as `8081`. |
+| Jenkins active-port detection originally used `sudo -n grep` | Jenkins sudoers permits only the approved switch script | Removed `sudo -n` from `grep`; verified Jenkins can read the config. |
+| First candidate HTTP request reset the connection | Container was still starting | Retry loop waited and the next health check passed. |
+| Need to confirm production routing after deployment | New candidate had started but traffic switch needed verification | `docker ps`, `grep proxy_pass`, and HTTPS checks confirmed Green `:9` active. |
+| Rollback/restore needed verification | Need to prove switch script can route to either slot | Switched to Blue `8081`, confirmed HTTPS 200, then switched back to Green `8082`; both operations passed. |
+
+## 10. State at end of 29 October session
+
+- Jenkins Build #9: successful.
+- Production: Green container, image `:9`, port `8082`.
+- Previous version: Blue container, image `:8`, port `8081`, still running.
+- Nginx: proxying to `127.0.0.1:8082`.
+- HTTPS: returned HTTP 200 in the `curl -k` check.
+- Manual switch to Blue and restore to Green: both successful.
+- Further upgrades: intentionally deferred to the next work session.
+
+### Next session checklist
+
+1. Confirm the public IP and certificate state before assuming today's endpoint remains valid.
+2. Test that image `:8` and image `:9` contain visibly different website content before claiming a content-level version switch was tested.
+3. Run a controlled Jenkins deployment-failure scenario only when it can be done safely, and verify the complete automated rollback path.
+4. Consider a normal certificate-verifying HTTPS check (without `-k`).
+5. Review ECR lifecycle/cleanup policy without deleting the currently deployed or rollback-required images.
+6. Continue other upgrades after this documented baseline.
